@@ -1,6 +1,7 @@
 package com.example.glucosehealthhub
 
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -231,7 +232,26 @@ private fun HealthScreen() {
         HealthMetricDisplay("Heart rate", health.heart,
             "Latest: ${health.latestHeartBpm ?: "—"} bpm  •  7-day average: ${health.averageHeartSevenDays ?: "—"} bpm")
         HealthMetricDisplay("Sleep", health.sleep,
-            "Latest sleep session span: ${health.latestSleepSessionHours?.let { "%.1f".format(it) } ?: "—"} hours")
+            "Latest session window: ${health.latestSleepSessionHours?.let { "%.1f".format(it) } ?: "—"} hours (not necessarily hours asleep)")
+        SleepHistoryDisplay(health.sleepHistory, readings)
+        HorizontalDivider()
+        Text("Verify source synchronization", style = MaterialTheme.typography.titleMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = {
+                runCatching {
+                    context.startActivity(Intent(HealthConnectClient.ACTION_HEALTH_CONNECT_SETTINGS))
+                }.onFailure {
+                    status = "Could not open Health Connect settings: ${it.localizedMessage}"
+                }
+            }) { Text("Health Connect settings") }
+            OutlinedButton(onClick = {
+                runCatching {
+                    val launch = context.packageManager.getLaunchIntentForPackage("com.sec.android.app.shealth")
+                        ?: error("Samsung Health not found")
+                    context.startActivity(launch)
+                }.onFailure { status = "Could not open Samsung Health: ${it.localizedMessage}" }
+            }) { Text("Open Samsung Health") }
+        }
         HorizontalDivider()
         Text("To enable Samsung Health sharing", style = MaterialTheme.typography.titleMedium)
         Text("1. Samsung Health → Settings → Health Connect → App permissions → Samsung Health.")
@@ -261,6 +281,66 @@ private fun GlucosePlot(readings: List<Reading>) {
             drawLine(color = Color(0xFF1976D2), start = a, end = b, strokeWidth = 3.dp.toPx())
         }
     }
+}
+
+@Composable
+private fun SleepHistoryDisplay(sessions: List<SleepOverview>, glucose: List<Reading>) {
+    var showAll by remember { mutableStateOf(false) }
+    if (sessions.isEmpty()) {
+        Text("No sleep sessions available from Health Connect. " +
+            "Confirm that the Sleep category has records in Health Connect, " +
+            "not just in Samsung Health.")
+        return
+    }
+    val recent = sessions.filter { it.end >= Instant.now().minus(Duration.ofDays(7)) }
+    val staged = recent.mapNotNull { it.asleepMinutes }.filter { it > 0 }
+    val average = if (staged.isNotEmpty()) staged.average() else null
+    Text("Sleep history", style = MaterialTheme.typography.titleLarge)
+    Text("Sessions in last 29 days: ${sessions.size}  •  Last 7 days: ${recent.size}")
+    Text("7-day mean of stage-confirmed sleep: " +
+        (average?.let { formatMinutes(it.toLong()) } ?: "Unavailable — no sleep stages supplied"))
+    Text("Each entry is matched with glucose recorded on its wake-up date, if available. " +
+        "This is a same-day comparison, not a clinical correlation or causal inference.",
+        style = MaterialTheme.typography.bodySmall)
+    OutlinedButton(onClick = { showAll = !showAll }) {
+        Text(if (showAll) "Show latest 7 sessions" else "Show all 29-day sessions")
+    }
+    (if (showAll) sessions else sessions.take(7)).forEach { night ->
+        val dayReadings = glucose.filter {
+            it.time.atZone(ZoneId.systemDefault()).toLocalDate() == night.wakeDay
+        }
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                val start = night.start.atZone(ZoneId.systemDefault())
+                    .format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
+                val end = night.end.atZone(ZoneId.systemDefault())
+                    .format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
+                Text("Wake-up date: ${night.wakeDay}", style = MaterialTheme.typography.titleMedium)
+                Text("Session: $start → $end")
+                Text("Session span: ${formatMinutes(night.sessionMinutes)}")
+                if (night.asleepMinutes != null) {
+                    Text("Stage-confirmed asleep: ${formatMinutes(night.asleepMinutes)}")
+                    Text("Light: ${formatMinutes(night.lightMinutes ?: 0L)}  •  " +
+                        "Deep: ${formatMinutes(night.deepMinutes ?: 0L)}  •  " +
+                        "REM: ${formatMinutes(night.remMinutes ?: 0L)}")
+                    Text("Awake/out of bed: ${formatMinutes(night.awakeMinutes ?: 0L)}")
+                    Text("Sleep stages supplied: ${night.stageCount} (unclassified gaps excluded)")
+                } else {
+                    Text("No sleep-stage detail supplied; cannot calculate actual time asleep.")
+                }
+                val glucoseText = if (dayReadings.isEmpty()) "No glucose readings that day"
+                else "${dayReadings.map { it.mgdl }.average().roundToInt()} mg/dL " +
+                    "(${dayReadings.size} readings)"
+                Text("Glucose on wake-up date: $glucoseText")
+                Text("Health Connect source: ${night.provider}", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+private fun formatMinutes(total: Long): String {
+    val m = total.coerceAtLeast(0L)
+    return "${m / 60}h ${m % 60}m"
 }
 
 @Composable
