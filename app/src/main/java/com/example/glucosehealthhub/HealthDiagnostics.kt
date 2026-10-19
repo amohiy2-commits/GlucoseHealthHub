@@ -29,6 +29,7 @@ internal data class HealthSnapshot(
     val latestHeartBpm: Long? = null,
     val averageHeartSevenDays: Long? = null,
     val latestSleepSessionHours: Double? = null,
+    val sleepHistory: List<SleepOverview> = emptyList(),
     val steps: HealthMetric = HealthMetric(),
     val heart: HealthMetric = HealthMetric(),
     val sleep: HealthMetric = HealthMetric(),
@@ -128,38 +129,49 @@ internal suspend fun checkHealthConnect(client: HealthConnectClient): HealthSnap
     } else heartMetric = HealthMetric(false, "Heart rate permission missing", "Allow Glucose Health Hub to READ heart rate.")
 
     var latestSleepHours: Double? = null
+    var sleepHistory: List<SleepOverview> = emptyList()
     var sleepMetric = HealthMetric(permissionGranted = sleepPermission in granted)
     if (sleepPermission in granted) {
         sleepMetric = try {
-            val records = client.readRecords(
-                ReadRecordsRequest(
-                    recordType = SleepSessionRecord::class,
-                    timeRangeFilter = TimeRangeFilter.between(historyStart, now),
-                    pageSize = 100,
-                    ascendingOrder = false,
-                )
-            ).records
-            val latest = records.maxByOrNull { it.endTime }
-            latestSleepHours = latest?.let {
-                Duration.between(it.startTime, it.endTime).toMinutes().toDouble() / 60
-            }
+            val result = readSleepHistory(client, historyStart, now)
+            sleepHistory = result.sessions
+            val latest = sleepHistory.firstOrNull()
+            latestSleepHours = latest?.sessionMinutes?.div(60.0)
+            val sourceSummary = sleepHistory.map { it.provider }.distinct().joinToString()
             HealthMetric(
                 permissionGranted = true,
-                summary = if (latest != null) "Data found" else "No sleep sessions in Health Connect (29 days)",
-                details = "Recent sessions sampled: ${records.size}. " +
-                    if (latest != null) "Showing last sleep session span (not sleep-stage-adjusted)." else "Check Samsung Health WRITE access.",
-                source = latest?.metadata?.dataOrigin?.packageName,
-                lastRecordedAt = latest?.endTime,
+                summary = if (latest != null) "Sleep sessions found: ${sleepHistory.size}"
+                    else "No sleep sessions available in Health Connect (29 days)",
+                details = if (latest != null)
+                    "Retrieved ${result.fetchedCount} records. ${if (result.pageLimitReached) "Pagination capped. " else ""}" +
+                    "Sources: ${sourceSummary}. Stage detail is included only when supplied by the source."
+                else
+                    "READ_SLEEP granted; there are no accessible sleep sessions for 29 days. " +
+                    "Samsung Health must have separate WRITE_SLEEP access to Health Connect. " +
+                    "A Galaxy Watch sleep session appears after Samsung processes and syncs it.",
+                source = latest?.provider,
+                lastRecordedAt = latest?.end,
             )
         } catch (e: Exception) {
-            HealthMetric(true, "Sleep query error", "${e.javaClass.simpleName}: ${e.message ?: "Unknown error"}")
+            HealthMetric(
+                permissionGranted = true,
+                summary = "Sleep read failed",
+                details = "${e.javaClass.simpleName}: ${e.message ?: "Unknown error"}"
+            )
         }
-    } else sleepMetric = HealthMetric(false, "Sleep permission missing", "Allow Glucose Health Hub to READ sleep sessions.")
+    } else {
+        sleepMetric = HealthMetric(
+            permissionGranted = false,
+            summary = "READ_SLEEP missing",
+            details = "Grant Glucose Health Hub permission to READ sleep sessions in Health Connect."
+        )
+    }
 
     return HealthSnapshot(
         stepsToday = todaySteps, stepsSevenDays = weekSteps,
         latestHeartBpm = latestHeart, averageHeartSevenDays = heartAverage,
         latestSleepSessionHours = latestSleepHours,
+        sleepHistory = sleepHistory,
         steps = stepsMetric, heart = heartMetric, sleep = sleepMetric
     )
 }
