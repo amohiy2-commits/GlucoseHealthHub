@@ -143,9 +143,8 @@ private fun HealthScreen() {
             HealthPermission.getReadPermission(SleepSessionRecord::class))
     }
     var readings by remember { mutableStateOf(EncryptedData.read(context)) }
-    var steps by remember { mutableStateOf<Long?>(null) }
-    var bpm by remember { mutableStateOf<Long?>(null) }
-    var sleepHours by remember { mutableStateOf<Double?>(null) }
+    var health by remember { mutableStateOf(HealthSnapshot()) }
+    var refreshing by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Import a mySugr CSV, then connect Health Connect.") }
     var loading by remember { mutableStateOf(false) }
     val client = remember {
@@ -155,28 +154,24 @@ private fun HealthScreen() {
 
     suspend fun refresh() {
         val c = client ?: run { status = "Health Connect is unavailable on this device."; return }
+        refreshing = true
         try {
-            val granted = c.permissionController.getGrantedPermissions()
-            if (!granted.containsAll(permissions)) { status = "Allow all three read permissions to view Samsung data."; return }
-            val now = Instant.now()
-            val start = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant()
-            val result = c.aggregate(AggregateRequest(
-                metrics = setOf(StepsRecord.COUNT_TOTAL, HeartRateRecord.BPM_AVG, SleepSessionRecord.SLEEP_DURATION_TOTAL),
-                timeRangeFilter = TimeRangeFilter.between(now.minus(Duration.ofDays(1)), now)))
-            bpm = result[HeartRateRecord.BPM_AVG]
-            sleepHours = result[SleepSessionRecord.SLEEP_DURATION_TOTAL]?.toMinutes()?.div(60.0)
-            val today = c.aggregate(AggregateRequest(
-                metrics = setOf(StepsRecord.COUNT_TOTAL),
-                timeRangeFilter = TimeRangeFilter.between(start, now)))
-            steps = today[StepsRecord.COUNT_TOTAL]
-            status = "Health Connect updated. Results depend on Samsung Health sync settings."
-        } catch (e: Exception) { status = "Health Connect read failed: ${e.localizedMessage}" }
+            val snapshot = checkHealthConnect(c)
+            health = snapshot
+            status = when {
+                snapshot.permittedCount == 0 -> "No Health Connect read permissions yet."
+                snapshot.missingData -> "${snapshot.permittedCount}/3 permissions granted, but no health values found. Check Samsung Health WRITE permissions."
+                else -> "Health Connect checked: ${snapshot.permittedCount}/3 permissions. See category details below."
+            }
+        } catch (e: Exception) {
+            status = "Health Connect error: ${e.javaClass.simpleName}: ${e.message.orEmpty()}"
+        } finally { refreshing = false }
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         PermissionController.createRequestPermissionResultContract()
-    ) { granted ->
-        scope.launch { if (granted.containsAll(permissions)) refresh() else status = "Permissions declined." }
+    ) {
+        scope.launch { refresh() }
     }
     val csvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
@@ -224,10 +219,25 @@ private fun HealthScreen() {
         Text("Last 30 days: ${average?.roundToInt()?.toString() ?: "—"} mg/dL average (${recent.size} readings)")
         GlucosePlot(recent)
         HorizontalDivider()
-        Text("Samsung Health · latest available", style = MaterialTheme.typography.titleLarge)
-        Text("Steps today: ${steps ?: "—"}")
-        Text("Average heart rate, last 24h: ${bpm ?: "—"} bpm")
-        Text("Sleep duration recorded over last 24h: ${sleepHours?.let { "%.1f".format(it) } ?: "—"} hours")
+        Text("Health Connect diagnostics", style = MaterialTheme.typography.titleLarge)
+        Text("Read permissions granted: ${health.permittedCount}/3")
+        Text("Health Connect is not the same as Samsung Health. The Samsung app must WRITE records here.")
+        Button(onClick = { scope.launch { refresh() } }, enabled = client != null && !refreshing) {
+            Text("Diagnose / Refresh Samsung data")
+        }
+        if (refreshing) LinearProgressIndicator(Modifier.fillMaxWidth())
+        HealthMetricDisplay("Steps", health.steps,
+            "Today: ${health.stepsToday ?: "—"}  •  7-day total: ${health.stepsSevenDays ?: "—"}")
+        HealthMetricDisplay("Heart rate", health.heart,
+            "Latest: ${health.latestHeartBpm ?: "—"} bpm  •  7-day average: ${health.averageHeartSevenDays ?: "—"} bpm")
+        HealthMetricDisplay("Sleep", health.sleep,
+            "Latest sleep session span: ${health.latestSleepSessionHours?.let { "%.1f".format(it) } ?: "—"} hours")
+        HorizontalDivider()
+        Text("To enable Samsung Health sharing", style = MaterialTheme.typography.titleMedium)
+        Text("1. Samsung Health → Settings → Health Connect → App permissions → Samsung Health.")
+        Text("2. Allow Samsung Health to WRITE steps, heart rate and sleep.")
+        Text("3. Open Samsung Health and swipe down to sync. Then refresh this app.")
+        Text("4. Health Connect → Data and access: verify records exist under Steps, Heart rate and Sleep.")
         HorizontalDivider()
         Text("This app displays records for information only and is not a medical device.", style = MaterialTheme.typography.bodySmall)
     }
@@ -249,6 +259,25 @@ private fun GlucosePlot(readings: List<Reading>) {
         }
         points.zipWithNext().forEach { (a, b) ->
             drawLine(color = Color(0xFF1976D2), start = a, end = b, strokeWidth = 3.dp.toPx())
+        }
+    }
+}
+
+@Composable
+private fun HealthMetricDisplay(title: String, metric: HealthMetric, value: String) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(value)
+            Text("Read permission: ${if (metric.permissionGranted) "GRANTED" else "MISSING"}")
+            Text("Data status: ${metric.summary}")
+            if (metric.details.isNotBlank()) Text(metric.details, style = MaterialTheme.typography.bodySmall)
+            if (metric.source != null) Text("Data source: ${metric.source}", style = MaterialTheme.typography.bodySmall)
+            if (metric.lastRecordedAt != null) {
+                val local = metric.lastRecordedAt.atZone(ZoneId.systemDefault())
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+                Text("Latest: $local (phone time)", style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
