@@ -10,8 +10,8 @@ android {
         applicationId = "com.example.glucosehealthhub"
         minSdk = 28
         targetSdk = 35
-        versionCode = 52
-        versionName = "0.5.2-diagnostics"
+        versionCode = 53
+        versionName = "0.5.3-sleep"
     }
     buildFeatures { compose = true }
     compileOptions {
